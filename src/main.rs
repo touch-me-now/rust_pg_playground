@@ -40,9 +40,12 @@ mod messages {
         }
     
         impl<'a> StartupMessage<'a> {
-            pub fn new(protocol_version: u32, parameters: &'a [(&'a str, &'a str)]) -> Self {
+            pub fn new(parameters: &'a [(&'a str, &'a str)]) -> Self {
+                // версию протокола я пока буду устанавливать здесь
+                // чтобы сосредаточится на одной версии протокола
+                // todo: на будующее надо бы узнать какие изменения произходили между протоколами
                 StartupMessage {
-                    protocol_version,
+                    protocol_version: 0x00030000,
                     parameters
                 }
             }
@@ -84,7 +87,7 @@ fn main() {
     let mut stream = TcpStream::connect("localhost:5432").unwrap();
 
     let parameters = vec![("user", "postgres"), ("database", "test"), ("client_encoding", "UTF8")];
-    let startup_msg: Vec<u8> = StartupMessage::new(0x00030000, &parameters).to_bytes();
+    let startup_msg: Vec<u8> = StartupMessage::new(&parameters).to_bytes();
     stream.write_all(&startup_msg).expect("Failed to send startup message");
 
     let mut buffer = [0; 512];  // буфер для чтения
