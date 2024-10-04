@@ -1,132 +1,162 @@
-use core::ToBytes;
+mod core;
+mod message;
+mod error;
+
 use std::{io::{Read, Write}, net::TcpStream};
 
+use crate::message::{ClientMessage, startup::StartupMessage, sasl::SaslInitialResponse};
 
-mod core {
-    pub mod buffer {
-        pub trait Buf {
-            fn extend_with_nil(&mut self, other: &[u8]);
-        }
-        
-        
-        impl Buf for Vec<u8> {
-            fn extend_with_nil(&mut self, other: &[u8]) {
-                self.extend_from_slice(other);
-                self.push(0);
-            }
-        }
+
+const BUF_SIZE: usize = 8192;
+
+struct PgMessage<'a>(&'a [u8]);
+
+impl<'a> PgMessage<'a> {
+    pub fn from_buf(buf: &'a Vec<u8>) -> Self {
+        PgMessage(buf)
     }
-    
-    pub trait ToBytes {
-        fn to_bytes(&self) -> Vec<u8>;
+
+    pub fn msg_type(&self) -> char {
+        self.0[0] as char
     }
-    
-    pub trait CalcLength {
-        fn calculate_length(&self, body: &[u8]) -> u32 {
-            (8 + body.len()) as u32
-        }
+
+    fn length_bytes(&self) -> &[u8] {
+        &self.0[1..5]
     }
-    
-}
 
-mod messages {
-    pub mod startup {
-        use crate::core::{buffer::Buf, CalcLength, ToBytes};
+    pub fn length(&self) -> u32 {
+        u32::from_be_bytes(self.length_bytes().try_into().unwrap())
+    }
 
-        #[derive(Debug)]
-        pub struct StartupMessage<'a> {
-            pub protocol_version: u32,
-            parameters: &'a [(&'a str, &'a str)],
-        }
-    
-        impl<'a> StartupMessage<'a> {
-            pub fn new(parameters: &'a [(&'a str, &'a str)]) -> Self {
-                // версию протокола я пока буду устанавливать здесь
-                // чтобы сосредаточится на одной версии протокола
-                // todo: на будующее надо бы узнать какие изменения произходили между протоколами
-                StartupMessage {
-                    protocol_version: 0x00030000,
-                    parameters
-                }
-            }
+    fn body_bytes(&self) -> &[u8] {
+        &self.0[5..(self.length() as usize)]
+    }
 
-            fn body_bytes(&self) -> Vec<u8> {
-                let mut body: Vec<u8> = Vec::new();
-        
-                for (key, value) in self.parameters {
-                    body.extend_with_nil(key.as_bytes());
-                    body.extend_with_nil(value.as_bytes());
-                }
-                body.push(0);
-                body
-            }
-        }
-    
-        impl CalcLength for StartupMessage<'_> {}
-    
-        impl ToBytes for StartupMessage<'_> {
-            fn to_bytes(&self) -> Vec<u8> {
-                let body: Vec<u8> = self.body_bytes();
-                let message_length: u32 = self.calculate_length(&body);
-        
-                let mut buffer: Vec<u8> = Vec::new();
-                buffer.extend_from_slice(&message_length.to_be_bytes());
-                buffer.extend_from_slice(&self.protocol_version.to_be_bytes());
+    pub fn body_string(&self) -> String {
+        String::from_utf8_lossy(&self.body_bytes()).to_string()
+    }
 
-                // buffer.extend_with_nil(&body);
-                buffer.extend_from_slice(&body);
-                buffer
-            }
-        }
+    pub fn get_auth_type(&self) -> u32 {
+        assert!(self.0.len() >= 8);
+
+        u32::from_be_bytes(self.0[5..9].try_into().unwrap())
     }
 }
 
-use messages::startup::StartupMessage;
 
 fn main() {
     let mut stream = TcpStream::connect("localhost:5432").unwrap();
+    let mut buffer = vec![0u8; BUF_SIZE];
 
-    let parameters = vec![("user", "postgres"), ("database", "test"), ("client_encoding", "UTF8")];
-    let startup_msg: Vec<u8> = StartupMessage::new(&parameters).to_bytes();
-    stream.write_all(&startup_msg).expect("Failed to send startup message");
+    let parameters = vec![("user", "postgres"), ("database", "postgres"), ("client_encoding", "UTF8")];
+    
+    println!("Startup...\n");
+    let mut startup_buf = Vec::new();
 
-    let mut buffer = [0; 512];  // буфер для чтения
+    StartupMessage::new(&parameters).encode(&mut startup_buf);
+    println!("{:#?}", String::from_utf8_lossy(&startup_buf.clone()));
+
+    stream.write_all(&startup_buf).expect("Failed to send startup message");
+
     let n = stream.read(&mut buffer).expect("Failed to read from stream");
-
     if n > 0 {
-        // Читаем тип сообщения
-        let message_type = buffer[0] as char;
-        println!("Message Type: {}", message_type);
+        let msg = PgMessage::from_buf(&buffer);
 
-        let response_str = String::from_utf8_lossy(&buffer[..n]);
+        println!("Message type: {}", msg.msg_type());
+        println!("Lenght: {}", msg.length());
+        println!("Body: {:?}", msg.body_string());
 
-        println!("PSQL Response: {:?}", response_str);
-
-        
-        // Читаем длину сообщения
-        let message_length = u32::from_be_bytes([buffer[1], buffer[2], buffer[3], buffer[4]]);
-        println!("Message Length: {}", message_length);
-
-        // Выводим содержимое сообщения (пример, как читать разные типы сообщений)
-        match message_type {
+        match msg.msg_type() {
             'R' => {
-                // 'R' означает сообщение аутентификации
-                
-                let auth_type = u32::from_be_bytes([buffer[5], buffer[6], buffer[7], buffer[8]]);
-                println!("Authentication Type: {}", auth_type);
+                println!("Auth...\n");
+                match msg.get_auth_type() {
+                    10 => {
+                        println!("Sasl...\n");
 
-                // todo: нужно реализовать Authentication
+                        
+                        let mut initial_buf = Vec::new();
+
+                        SaslInitialResponse::new("postgres")
+                            .encode(&mut initial_buf);
+
+                        println!("{:?}", String::from_utf8_lossy(&initial_buf.clone()));
+
+                        stream.write_all(&initial_buf).expect("Failed to send mechanism");
+
+                        let mut response = [0; 4096];
+                        let n = stream.read(&mut response).expect("Failed to read response");
+
+                        let msg = String::from_utf8_lossy(&response[..n]);
+                        println!("Received: {:?}", msg);
+                    },
+                    ot => {
+                        println!("Unsupported auth type: {}", ot);
+                    }
+                }
             },
             'E' => {
                 // 'E' означает сообщение ошибки
-                let error_message = String::from_utf8_lossy(&buffer[5..(message_length as usize)]);
+                let error_message = String::from_utf8_lossy(&buffer[5..(msg.length() as usize)]);
                 println!("Error Message: {}", error_message);
             },
-            _ => {
-                println!("Unknown message type received: {}", message_type);
+            other => {
+                println!("Unknown message type received: {}", other);
             }
         }
     }
 
+    
+
+
+    
+    // let n = stream.read(&mut buffer).expect("Failed to read from stream");
+
+    // if n > 0 {
+    //     let msg_type = buffer[0] as char;
+
+    //     let length_bytes = &buffer[1..5];
+    //     let length: u32 = u32::from_be_bytes(length_bytes.try_into().unwrap());
+
+    //     let body_bytes = &buffer[5..(length as usize)];
+    //     let body = String::from_utf8_lossy(body_bytes).to_string();
+
+    //     println!("body: {}", body);
+
+    //     match msg_type {
+    //         'R' => {
+    //             println!("Auth: {}", String::from_utf8_lossy(&buffer[5..9]));
+
+    //             let auth_type = u32::from_be_bytes(buffer[5..9].try_into().unwrap());
+    //             println!("Authentication Type: {}", auth_type);
+
+    //             match auth_type {
+    //                 10 => {
+    //                     println!("auth type sasl");
+    //                     let sasl_initial = SaslInitialResponse::new("postgres").encode().unwrap();
+    //                     // println!("sasl initial: {:?}", String::from_utf8(sasl_initial));
+
+    //                     stream.write_all(&sasl_initial).expect("Failed to send sasl initial response message");
+
+    //                 },
+    //                 _ => {
+    //                     println!("Unsupported auth type: {}", auth_type);
+    //                 }
+    //             }
+
+    //             // todo: нужно реализовать Authentication
+    //         },
+    //         'E' => {
+    //             // 'E' означает сообщение ошибки
+    //             let error_message = String::from_utf8_lossy(&buffer[5..(length as usize)]);
+    //             println!("Error Message: {}", error_message);
+    //         },
+    //         _ => {
+    //             println!("Unknown message type received: {}", msg_type);
+    //         }
+    //     }
+
+    // }
+    // let n = stream.read(buffer)?;
+    
     stream.shutdown(std::net::Shutdown::Both).unwrap();
 }
