@@ -1,12 +1,25 @@
 pub mod buf {
-    pub trait ExtendWithNull {
-        fn extend_with_null(&mut self, s: &str);
+    use bytes::{BufMut, BytesMut};
+
+    pub trait PutNull {
+        fn put_null(&mut self, s: &str);
     }
     
-    impl ExtendWithNull for Vec<u8> {
-        fn extend_with_null(&mut self, s: &str) {
+    impl PutNull for BytesMut {
+        fn put_null(&mut self, s: &str) {
             self.extend(s.as_bytes());
-            self.push(0);
+            self.put_u8(0);
         }
+    }
+}
+
+pub mod addition {
+    use rand::Rng;
+
+    pub fn random_nonce() -> String {
+        let mut rng = rand::thread_rng();
+        (0..24)
+            .map(|_| rng.sample(rand::distributions::Alphanumeric) as char)
+            .collect()
     }
 }

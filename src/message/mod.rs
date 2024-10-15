@@ -1,33 +1,54 @@
-pub mod startup;
 pub mod sasl;
+pub mod startup;
 
+use bytes::{BufMut, Bytes, BytesMut};
+    
+use crate::error::{EncodeError, DecodeError};
 
 #[repr(u8)]
-pub enum ClientMsgType {
+pub enum FrontendFormat {
     Password = b'p',
 }
 
-pub trait ClientMessage {
-    const MSG_TYPE: Option<ClientMsgType>;
-
-    fn encode_body(&self, buf: &mut Vec<u8>);
+pub trait FrontendMessage {
+    const FORMAT: Option<FrontendFormat>;
+    
+    fn encode_body(&self, buf: &mut BytesMut) -> Result<(), EncodeError>;
 
     fn body_length(&self) -> u32;
 
-    fn encode(&self, buf: &mut Vec<u8>) {
-        if let Some(msg_type) = Self::MSG_TYPE {
-            buf.push(msg_type as u8);
-        }
-
+    fn length(&self) -> u32 {
         // type(1) + lenght(4) + body(n)
-        let message_length: u32 = 5 + self.body_length();
-        buf.extend_from_slice(&message_length.to_be_bytes());
+        5 + self.body_length()
+    }
 
-        self.encode_body(buf);
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), EncodeError> {
+        if let Some(msg_type) = Self::FORMAT {
+            buf.put_u8(msg_type as u8);
+        }
+        
+        buf.extend_from_slice(&self.length().to_be_bytes());
+        self.encode_body(buf)
     }
 }
 
-// pub trait BackendMessage: Sized {
-//     fn decode(buf: &[u8]) -> Result<Self, PgError>;
-// }
+pub trait BackendMessage: Sized {
+    fn decode(buf: &Bytes) -> Result<Self, DecodeError>;
+}
 
+pub struct PgMessage {
+    pub msg_type: char,
+    pub content: Bytes
+}
+
+
+impl BackendMessage for PgMessage {
+    fn decode(buf: &Bytes) -> Result<Self, DecodeError> {
+        Ok(
+            PgMessage { 
+                msg_type: buf[0] as char, 
+                content: buf.slice(5..),
+            }
+        )
+    }
+}
